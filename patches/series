@@ -245,7 +245,7 @@
 #       RARCH_PATH_CONFIG is still empty.
 #       tasks/task_content.c
 0105-preserve-config-on-content-load
-# 0106  SCE ctype stubs (isgraph etc.) return 0 under Kyty / without a rune
-#       table, so config_file parsed 0 entries from a valid retroarch.cfg and
-#       video_driver/menu_driver stayed at compiled defaults. Fixed in
-#       src/libc_shims.c (ASCII C-locale ctype), not a RetroArch tree patch.
+# 0106  SCE ctype stubs make isgraph return 0 (Kyty / no rune table), so
+#       config_file parsed 0 entries from a valid cfg and drivers stayed at
+#       compiled defaults. Replace isgraph with ASCII checks in config_file.c.
+0106-ascii-isgraph-config-parse

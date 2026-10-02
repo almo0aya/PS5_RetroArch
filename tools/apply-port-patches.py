@@ -3475,6 +3475,24 @@ static void ps5_core_option_default(struct core_option *option)
         "      return true;\n",
         "patches/series, 0105): native PS5 display backend",
     ),
+    (
+        # 0106: SCE ctype stubs make isgraph always 0 (Kyty / no rune table), so
+        # config_file accepted no keys and video_driver/menu_driver never left
+        # the compiled defaults even when -c pointed at a valid cfg.
+        "libretro-common/file/config_file.c",
+        "      while (line[idx] && isgraph((int)line[idx]))\n",
+        "      /* patches/series, 0106: ASCII isgraph; SCE ctype stubs return 0. */\n"
+        "      while (line[idx] && ((unsigned char)line[idx] > 0x20 && (unsigned char)line[idx] < 0x7f))\n",
+        "patches/series, 0106: ASCII isgraph; SCE ctype stubs return 0.",
+    ),
+    (
+        "libretro-common/file/config_file.c",
+        "   while (isgraph((int)*line))\n",
+        "   /* patches/series, 0106: ASCII isgraph for keys; SCE ctype stubs return 0. */\n"
+        "   while ((unsigned char)(*line) > 0x20 && (unsigned char)(*line) < 0x7f)\n",
+        "patches/series, 0106: ASCII isgraph for keys",
+    ),
+
 ]
 
 # Changes that are withdrawn rather than deleted, by marker.
