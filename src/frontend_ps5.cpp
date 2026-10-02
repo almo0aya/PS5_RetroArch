@@ -113,10 +113,20 @@ void initialize(void *)
     }
 }
 
-void environment(int *, char **, void *, void *)
+void environment(int *, char **, void * /*args*/, void * /*params_data*/)
 {
-    /* Keep the title's original argv on startup. A NULL callback makes task_content
-     * substitute menu_content_environment_get(), which loses the initial -c. */
+    /* Intentionally leave RARCH_MAIN_WRAP_FLAG_TOUCHED unset.
+     *
+     * Setting it would make content_load_init_wrap rebuild argv and drop the
+     * title's extras from args.txt (--max-frames, --log-file, ...). Leaving it
+     * unset keeps the original argv, including `-c /app0/config/retroarch.cfg`.
+     *
+     * A NULL callback is worse: task_content substitutes
+     * menu_content_environment_get(), which sets TOUCHED. On the first wrap
+     * RARCH_PATH_CONFIG is still empty, so -c would be dropped and every
+     * setting would fall back to compiled defaults. patches/series 0105 closes
+     * that hole for rebuilds; this empty callback avoids the rebuild on CLI
+     * startup. */
 }
 
 int drives(void *data, bool content)
