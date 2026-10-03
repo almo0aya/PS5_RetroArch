@@ -1,0 +1,168 @@
+# Build the PS5 RetroArch title and upload dist/<title id>/.
+#
+# The public toolchain is ps5-payload-dev/sdk v0.42 plus the headers and
+# platform layer from mihawk-99/PS5_PayloadSDK. tools/setup-native-dependencies.sh
+# does not clone that fork; it git-archives a sibling checkout at the revision
+# the script pins. This workflow fetches those commits (they are public; the
+# RetroArch pin is also tag retroarch-v0.6.0-alpha.6) and PS5_Vulkan's pin,
+# builds the RADV archive the title links, then runs tools/build-title.sh.
+#
+# PS5_RELEASE_TAG is set so RPCS3 is left out. The project forbids uploading
+# RPCS3 binaries (GPL-2.0-only combined with this port's GPL-3.0 code). A
+# release-mode title is the documented package that still produces eboot.bin
+# under dist/PPSA99169/.
+#
+# Host ld.lld writes EI_OSABI NONE for -m elf_x86_64. tools/check-core.py
+# rejects that. The from-source build that produced dist/PPSA99169/eboot.bin
+# patched the installed prospero-lld so --shared outputs are FreeBSD OSABI 9.
+# The public SDK pin does not include that, so the same adjustment is applied
+# to the runner's installed SDK copy. eboot.bin is still produced by the
+# project's signer, not by rewriting the SELF.
+
+name: Build title
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: build-title-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    name: Build PPSA99169 and upload it
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      LLVM_CONFIG: /usr/bin/llvm-config-18
+      # Not a published release. Only selects the release-mode core list.
+      PS5_RELEASE_TAG: ci-${{ github.sha }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the host toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes \
+            clang-18 lld-18 llvm-18 llvm-18-dev libclang-rt-18-dev \
+            libclc-18-dev llvm-spirv-18 \
+            cmake ninja-build python3 python3-pip python3-mako python3-yaml python3-setuptools \
+            pkg-config flex bison git curl wget unzip tar xz-utils patch rsync \
+            zlib1g-dev nasm autoconf automake libtool g++ make binutils ca-certificates
+          python3 -m pip install --break-system-packages 'meson>=1.4'
+          sudo ln -sfn /usr/bin/clang-18 /usr/bin/clang
+          sudo ln -sfn /usr/bin/clang++-18 /usr/bin/clang++
+          for tool in llvm-ar llvm-ranlib llvm-nm llvm-objcopy llvm-objdump llvm-strip ld.lld; do
+            sudo ln -sfn "/usr/bin/${tool}-18" "/usr/local/bin/${tool}"
+          done
+          clang --version | head -n 1
+          ld.lld --version | head -n 1
+          meson --version
+          df -h /
+
+      - name: Fetch the public SDK, Mesa, and Vulkan checkouts
+        run: |
+          set -euo pipefail
+          parent=$(dirname "$GITHUB_WORKSPACE")
+          vulkan="$parent/PS5_Vulkan"
+          mesa="$parent/PS5_Mesa"
+          sdk="$parent/PS5_PayloadSDK"
+          git clone --depth 1 https://github.com/mihawk-99/PS5_Vulkan.git "$vulkan"
+          mesa_revision=$(sed -n 's/^mesa_revision=//p' "$vulkan/tools/build-radv.sh")
+          vulkan_sdk=$(sed -n 's/^sdk_revision=//p' "$vulkan/tools/setup-native-dependencies.sh")
+          retro_sdk=$(sed -n 's/^sdk_revision=//p' tools/setup-native-dependencies.sh)
+          [[ $mesa_revision =~ ^[0-9a-f]{40}$ ]]
+          [[ $vulkan_sdk =~ ^[0-9a-f]{40}$ ]]
+          [[ $retro_sdk =~ ^[0-9a-f]{40}$ ]]
+          git init "$mesa"
+          git -C "$mesa" remote add origin https://github.com/mihawk-99/PS5_Mesa.git
+          git -C "$mesa" fetch --depth 1 origin "$mesa_revision"
+          git -C "$mesa" checkout --detach FETCH_HEAD
+          git init "$sdk"
+          git -C "$sdk" remote add origin https://github.com/mihawk-99/PS5_PayloadSDK.git
+          git -C "$sdk" fetch --depth 1 origin "$retro_sdk"
+          git -C "$sdk" fetch --depth 1 origin "$vulkan_sdk"
+          git -C "$sdk" checkout --detach "$retro_sdk"
+          git -C "$sdk" cat-file -e "$vulkan_sdk^{commit}"
+          echo "RetroArch SDK pin $retro_sdk"
+          echo "Vulkan SDK pin $vulkan_sdk"
+          echo "Mesa pin $mesa_revision"
+
+      - name: Build the RADV archive the title links
+        run: |
+          set -euo pipefail
+          vulkan="$(dirname "$GITHUB_WORKSPACE")/PS5_Vulkan"
+          bash "$vulkan/tools/setup-native-dependencies.sh"
+          bash "$vulkan/tools/build-radv.sh" release
+          # The installed archive and PROVENANCE.txt are what the title reads.
+          rm -rf "$vulkan/.deps/work"
+          df -h /
+
+      - name: Install this repo's SDK and fix shared-object OSABI
+        run: |
+          set -euo pipefail
+          bash tools/setup-native-dependencies.sh
+          python3 - << 'END_PATCH'
+          from pathlib import Path
+          path = Path(".deps/native/ps5-payload-sdk/bin/prospero-lld")
+          text = path.read_text()
+          old = (
+              'exec "${BIN_PATH}" \\\n'
+              '     -m elf_x86_64 $PIE $LDSCRIPT --eh-frame-hdr \\\n'
+              '     -z max-page-size=0x4000 -mllvm -emulated-tls \\\n'
+              '     "$@" --hash-style=gnu\n'
+          )
+          new = (
+              '"${BIN_PATH}" \\\n'
+              '     -m elf_x86_64 $PIE $LDSCRIPT --eh-frame-hdr \\\n'
+              '     -z max-page-size=0x4000 -mllvm -emulated-tls \\\n'
+              '     "$@" --hash-style=gnu\n'
+              'status=$?\n'
+              'if [[ $status -eq 0 ]]; then\n'
+              '  _out=""; _shared=0; _args=("$@")\n'
+              '  for ((i=0; i<${#_args[@]}; i++)); do\n'
+              '    case "${_args[$i]}" in\n'
+              '      --shared) _shared=1 ;;\n'
+              '      -o) _out="${_args[$((i+1))]}" ;;\n'
+              '    esac\n'
+              '  done\n'
+              '  if [[ $_shared -eq 1 && -n $_out && -f $_out ]]; then\n'
+              '    python3 -c \'import pathlib,sys; p=pathlib.Path(sys.argv[1]); b=bytearray(p.read_bytes()); b[7]=9 if len(b)>8 and b[:4]==b"\\x7fELF" and b[7]!=9 else b[7]; p.write_bytes(b)\' "$_out"\n'
+              '  fi\n'
+              'fi\n'
+              'exit $status\n'
+          )
+          if "b[7]=9" in text or "b[7] = 9" in text:
+              print("prospero-lld already sets FreeBSD OSABI on shared objects")
+          elif old not in text:
+              raise SystemExit("prospero-lld does not match the public SDK wrapper; not patching blindly")
+          else:
+              path.write_text(text.replace(old, new, 1))
+              print("patched installed prospero-lld for EI_OSABI FreeBSD on --shared outputs")
+          END_PATCH
+
+      - name: Build the title
+        run: |
+          set -euo pipefail
+          bash tools/build-title.sh
+          title_id=$(python3 -c 'import json; print(json.load(open("sce_sys/param.json"))["titleId"])')
+          test -f "dist/$title_id/eboot.bin"
+          echo "TITLE_ID=$title_id" >> "$GITHUB_ENV"
+          find "dist/$title_id" -type f | wc -l
+          stat -c '%s bytes eboot.bin' "dist/$title_id/eboot.bin"
+
+      - name: Upload the title folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TITLE_ID }}
+          path: dist/${{ env.TITLE_ID }}
+          if-no-files-found: error
+          retention-days: 14
