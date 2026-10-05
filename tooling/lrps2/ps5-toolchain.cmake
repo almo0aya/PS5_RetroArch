@@ -32,7 +32,9 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-nostdlib -nostartfiles -nodefaultlibs -Wl,-e,0
 # -Dstatic_assert=_Static_assert and -DZSTD_TRACE=0: the same shims the Dolphin
 # and PPSSPP builds use (see tooling/ppsspp/ps5-toolchain.cmake).
 set(CMAKE_C_FLAGS_INIT "-O2 -fPIC -w -Dstatic_assert=_Static_assert -DZSTD_TRACE=0")
-set(CMAKE_CXX_FLAGS_INIT "-O2 -fPIC -w -DZSTD_TRACE=0")
+# ps5-intrin-compat.h: the SDK target declares only the intrinsics of enabled
+# ISA extensions, and GS/GSVector8i.h names two AVX-512BW ones (see the header).
+set(CMAKE_CXX_FLAGS_INIT "-O2 -fPIC -w -DZSTD_TRACE=0 -include ${CMAKE_CURRENT_LIST_DIR}/ps5-intrin-compat.h")
 
 # The core's link contract, the same one every other native core uses: no host
 # CRT or libc, undefined symbols resolved later by the title's binding table,
