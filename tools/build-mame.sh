@@ -21,7 +21,7 @@ source "$root/tools/core-fork.sh"
 core_stamp_skip mame \
     "$root/build/cores/stage/cores/mame_libretro.so" \
     "$root/build/cores/stage/info/mame_libretro.info" \
-    -- "$root/tools/build-mame.sh" "$root/tools/core-fork.sh"
+    -- "$root/tools/build-mame.sh" "$root/tools/core-fork.sh" "$root/tooling/mame"
 [[ $# == 0 ]] || { echo "usage: ${0##*/}" >&2; exit 2; }
 
 revision=fa592b0e100036be87c0cf2af75e325885020eec  # ../PS5_MAME main
@@ -33,6 +33,7 @@ core_fork_info mame_libretro.info c3a2f1e0d816debfd06e76d427c46fccbce6a7d5fd9b01
 # new build configuration (MAME's scripts/, which GENie turns into makefiles, or
 # this script) starts from an empty build/; ccache makes that cheap.
 configuration="$(git -C "$source_dir" rev-parse "$revision:scripts") $(sha256sum < "$root/tools/build-mame.sh")"
+configuration+=" $(sha256sum < "$root/tooling/mame/ps5-intrin-compat.h")"
 if [[ ! -f $source_dir/build/.configuration || $(<"$source_dir/build/.configuration") != "$configuration" ]]; then
     rm -rf -- "$source_dir/build"
     mkdir -p "$source_dir/build"
@@ -46,9 +47,13 @@ export CCACHE_BASEDIR="$source_dir" CCACHE_SLOPPINESS=time_macros
 make -C "$source_dir" -j"${JOBS:-10}" OSD=retro CONFIG=libretro TARGETOS=freebsd PTR64=1 \
     CLANG_VERSION="$("$CC" --version | sed -n 's/.*clang version \([0-9.]*\).*/\1/p' | head -n1)" \
     PRECOMPILE=0 NOWERROR=1 REGENIE=1 CROSS_BUILD=1 PYTHON_EXECUTABLE=python3 \
+    `# The SDK target declares only enabled ISA extensions' intrinsics; lzma's` \
+    `# AesOpt.c needs the VAES ones (see the header).` \
+    ARCHOPTS_C="-include $root/tooling/mame/ps5-intrin-compat.h" \
     NO_USE_MIDI=1 NO_USE_PORTAUDIO=1 NO_USE_BGFX=1 DONT_USE_NETWORK=1 NO_OPENGL=1 USE_QTDEBUG=0 \
     OVERRIDE_CC="$core_cc" OVERRIDE_CXX="$core_cxx" OVERRIDE_AR="$AR" \
     `# The libretro version script is set on the OSD's static library, which a` \
     `# final link does not see: without it here the core exports all of MAME.` \
     LDOPTS="$core_ldflags $core_libs -Wl,--version-script=$source_dir/src/osd/libretro/libretro-internal/link.T"
-core_fork_stage "$source_dir/mame_libretro.so" "$core_info" "$revision" tools/build-mame.sh
+core_fork_stage "$source_dir/mame_libretro.so" "$core_info" "$revision" tools/build-mame.sh \
+    tooling/mame/ps5-intrin-compat.h
