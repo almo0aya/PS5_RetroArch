@@ -150,6 +150,12 @@ jobs:
               print("patched installed prospero-lld for EI_OSABI FreeBSD on --shared outputs")
           END_PATCH
 
+      - name: Fetch the pinned RetroArch sources
+        run: |
+          set -euo pipefail
+          bash tools/fetch-retroarch.sh
+          bash tools/fetch-retroarch.sh --verify
+
       - name: Build the title
         run: |
           set -euo pipefail
