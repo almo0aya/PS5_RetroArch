@@ -59,6 +59,7 @@ bash "$root/tools/setup-native-dependencies.sh" >/dev/null
 }
 
 echo "==> [title] step 1/3: the frontend"
+export PS5_PAYLOAD_SDK="$sdk"
 "$root/tools/build-retroarch.sh"
 core_names=(fceumm mgba snes9x fbneo genesis_plus_gx ppsspp dolphin pcsx2
     mednafen_psx_hw mupen64plus_next mednafen_saturn vice_x64sc desmume azahar mame rpcs3)
