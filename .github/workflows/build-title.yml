@@ -159,7 +159,21 @@ jobs:
       - name: Build the title
         run: |
           set -euo pipefail
-          bash tools/build-title.sh
+          if ! bash tools/build-title.sh; then
+            echo '==== build/ra-conf/configure.log ===='
+            if [[ -f build/ra-conf/configure.log ]]; then
+              cat build/ra-conf/configure.log
+            else
+              echo '(missing)'
+            fi
+            echo '==== build/ra-conf/info.log ===='
+            if [[ -f build/ra-conf/info.log ]]; then
+              cat build/ra-conf/info.log
+            else
+              echo '(missing)'
+            fi
+            exit 1
+          fi
           title_id=$(python3 -c 'import json; print(json.load(open("sce_sys/param.json"))["titleId"])')
           test -f "dist/$title_id/eboot.bin"
           echo "TITLE_ID=$title_id" >> "$GITHUB_ENV"
