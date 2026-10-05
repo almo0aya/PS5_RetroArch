@@ -1,0 +1,5 @@
+llvm/LICENSE.TXT from https://github.com/mihawk-99/PS5_LLVM at 98b45cc22e98844b7d49bbedefdfee04a740650a
+(the revision tools/build-llvm.sh pins; llvmorg-22.1.8 and the port), unmodified.
+sha256 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee
+The last fallback tooling/notices/components.json names for the LLVM licence text, for a
+build (CI) that has neither .deps/llvm-project nor a sibling ../PS5_LLVM checkout.

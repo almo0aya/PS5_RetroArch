@@ -21,8 +21,10 @@
 
 name: Build title
 
+# workflow_dispatch only: with pull_request as well every push to the PR started
+# two identical multi-hour builds in different concurrency groups (refs/pull/N/merge
+# and the branch), and the slower twin ran into the 6-hour job limit.
 on:
-  pull_request:
   workflow_dispatch:
 
 permissions:

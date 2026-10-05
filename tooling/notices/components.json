@@ -85,7 +85,7 @@
       "artifacts": ["eboot.bin"],
       "licence": "Apache-2.0 WITH LLVM-exception",
       "copyright": ["Copyright (c) 2003-2026 University of Illinois at Urbana-Champaign and the LLVM project contributors"],
-      "texts": [{"from": ["${LLVM}/llvm/LICENSE.TXT", "../PS5_LLVM/llvm/LICENSE.TXT"], "to": "LICENSE.TXT"}],
+      "texts": [{"from": ["${LLVM}/llvm/LICENSE.TXT", "../PS5_LLVM/llvm/LICENSE.TXT", "tooling/third_party/llvm/LICENSE.TXT"], "to": "LICENSE.TXT"}],
       "source": {"kind": "fixed", "revision": "ps5-payload-dev SDK v0.42 release archives", "url": "https://github.com/ps5-payload-dev/sdk/releases/tag/v0.42"},
       "modifications": "Unmodified release archives of the SDK. RPCS3's own LLVM is listed with that core."
     },
@@ -370,7 +370,7 @@
       "texts": [
         {"from": ".deps/rpcs3-src/LICENSE", "to": "LICENSE"},
         {"from": ".deps/rpcs3-src/3rdparty/wolfssl/wolfssl/LICENSING", "to": "wolfSSL-LICENSING"},
-        {"from": ["${LLVM}/llvm/LICENSE.TXT", "../PS5_LLVM/llvm/LICENSE.TXT"], "to": "LLVM-LICENSE.TXT"},
+        {"from": ["${LLVM}/llvm/LICENSE.TXT", "../PS5_LLVM/llvm/LICENSE.TXT", "tooling/third_party/llvm/LICENSE.TXT"], "to": "LLVM-LICENSE.TXT"},
         {"tar": ".deps/downloads/ffmpeg-8.1.1.tar.xz", "member": "ffmpeg-8.1.1/LICENSE.md", "to": "FFmpeg-LICENSE.md"},
         {"tar": ".deps/downloads/ffmpeg-8.1.1.tar.xz", "member": "ffmpeg-8.1.1/COPYING.LGPLv2.1", "to": "FFmpeg-COPYING.LGPLv2.1"},
         {"tar": ".deps/downloads/libiconv-1.18.tar.gz", "member": "libiconv-1.18/COPYING.LIB", "to": "libiconv-COPYING.LIB"}
