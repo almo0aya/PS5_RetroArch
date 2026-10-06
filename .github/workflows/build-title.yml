@@ -5,7 +5,9 @@
 # does not clone that fork; it git-archives a sibling checkout at the revision
 # the script pins. This workflow fetches those commits (they are public; the
 # RetroArch pin is also tag retroarch-v0.6.0-alpha.6) and PS5_Vulkan's pin,
-# builds the RADV archive the title links, then runs tools/build-title.sh.
+# builds the RADV archive the title links, builds cores in parallel jobs so no
+# single job sits on the 6-hour GitHub Actions cap, then runs tools/build-title.sh
+# with CFGFIX_USE_STAGED_CORES=1.
 #
 # PS5_RELEASE_TAG is set so RPCS3 is left out. The project forbids uploading
 # RPCS3 binaries (GPL-2.0-only combined with this port's GPL-3.0 code). A
@@ -35,43 +37,29 @@ concurrency:
   group: build-title-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  title:
-    name: Build PPSA99169 and upload it
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    env:
-      LLVM_CONFIG: /usr/bin/llvm-config-18
-      # Not a published release. Only selects the release-mode core list.
-      PS5_RELEASE_TAG: ci-${{ github.sha }}
+env:
+  LLVM_CONFIG: /usr/bin/llvm-config-18
+  # Not a published release. Only selects the release-mode core list.
+  PS5_RELEASE_TAG: ci-${{ github.sha }}
 
+jobs:
+  deps:
+    name: SDK and RADV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      sdk_revision: ${{ steps.pins.outputs.sdk_revision }}
+      mesa_revision: ${{ steps.pins.outputs.mesa_revision }}
+      vulkan_sdk: ${{ steps.pins.outputs.vulkan_sdk }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Install the host toolchain
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes \
-            clang-18 lld-18 llvm-18 llvm-18-dev libclang-rt-18-dev \
-            libclc-18-dev llvm-spirv-18 libllvmspirvlib-18-dev \
-            spirv-tools libclang-18-dev libclang-cpp18-dev glslang-tools \
-            cmake ninja-build python3 python3-pip python3-mako python3-yaml python3-setuptools \
-            pkg-config flex bison git curl wget unzip tar xz-utils patch rsync \
-            zlib1g-dev nasm autoconf automake libtool g++ make binutils ca-certificates
-          python3 -m pip install --break-system-packages 'meson>=1.4'
-          sudo ln -sfn /usr/bin/clang-18 /usr/bin/clang
-          sudo ln -sfn /usr/bin/clang++-18 /usr/bin/clang++
-          for tool in llvm-ar llvm-ranlib llvm-nm llvm-objcopy llvm-objdump llvm-strip ld.lld; do
-            sudo ln -sfn "/usr/bin/${tool}-18" "/usr/local/bin/${tool}"
-          done
-          clang --version | head -n 1
-          ld.lld --version | head -n 1
-          meson --version
-          df -h /
+        run: bash tools/ci-install-host-toolchain.sh
 
       - name: Fetch the public SDK, Mesa, and Vulkan checkouts
+        id: pins
         run: |
           set -euo pipefail
           parent=$(dirname "$GITHUB_WORKSPACE")
@@ -95,62 +83,266 @@ jobs:
           git -C "$sdk" fetch --depth 1 origin "$vulkan_sdk"
           git -C "$sdk" checkout --detach "$retro_sdk"
           git -C "$sdk" cat-file -e "$vulkan_sdk^{commit}"
+          {
+            echo "sdk_revision=$retro_sdk"
+            echo "mesa_revision=$mesa_revision"
+            echo "vulkan_sdk=$vulkan_sdk"
+          } >> "$GITHUB_OUTPUT"
           echo "RetroArch SDK pin $retro_sdk"
           echo "Vulkan SDK pin $vulkan_sdk"
           echo "Mesa pin $mesa_revision"
 
+      - name: Restore cached SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: .deps/native/ps5-payload-sdk
+          key: sdk-${{ steps.pins.outputs.sdk_revision }}-${{ hashFiles('tools/setup-native-dependencies.sh', 'tools/ci-patch-prospero-lld.py') }}
+
+      - name: Restore cached RADV archive
+        id: cache-radv
+        uses: actions/cache@v4
+        with:
+          path: .deps/ci/radv-release
+          key: radv-${{ steps.pins.outputs.mesa_revision }}-${{ steps.pins.outputs.vulkan_sdk }}
+
       - name: Build the RADV archive the title links
+        if: steps.cache-radv.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           vulkan="$(dirname "$GITHUB_WORKSPACE")/PS5_Vulkan"
           bash "$vulkan/tools/setup-native-dependencies.sh"
           bash "$vulkan/tools/build-radv.sh" release
-          # The installed archive and PROVENANCE.txt are what the title reads.
           rm -rf "$vulkan/.deps/work"
+          mkdir -p .deps/ci
+          rm -rf .deps/ci/radv-release
+          cp -a "$vulkan/.deps/native/radv-release" .deps/ci/radv-release
           df -h /
+
+      - name: Place cached RADV into the Vulkan tree
+        if: steps.cache-radv.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          vulkan="$(dirname "$GITHUB_WORKSPACE")/PS5_Vulkan"
+          mkdir -p "$vulkan/.deps/native"
+          rm -rf "$vulkan/.deps/native/radv-release"
+          cp -a .deps/ci/radv-release "$vulkan/.deps/native/radv-release"
+          test -f "$vulkan/.deps/native/radv-release/lib/libvulkan_radeon.ps5.a"
+          echo "restored RADV archive from cache"
 
       - name: Install this repo's SDK and fix shared-object OSABI
         run: |
           set -euo pipefail
-          bash tools/setup-native-dependencies.sh
-          python3 - << 'END_PATCH'
-          from pathlib import Path
-          path = Path(".deps/native/ps5-payload-sdk/bin/prospero-lld")
-          text = path.read_text()
-          old = (
-              'exec "${BIN_PATH}" \\\n'
-              '     -m elf_x86_64 $PIE $LDSCRIPT --eh-frame-hdr \\\n'
-              '     -z max-page-size=0x4000 -mllvm -emulated-tls \\\n'
-              '     "$@" --hash-style=gnu\n'
-          )
-          new = (
-              '"${BIN_PATH}" \\\n'
-              '     -m elf_x86_64 $PIE $LDSCRIPT --eh-frame-hdr \\\n'
-              '     -z max-page-size=0x4000 -mllvm -emulated-tls \\\n'
-              '     "$@" --hash-style=gnu\n'
-              'status=$?\n'
-              'if [[ $status -eq 0 ]]; then\n'
-              '  _out=""; _shared=0; _args=("$@")\n'
-              '  for ((i=0; i<${#_args[@]}; i++)); do\n'
-              '    case "${_args[$i]}" in\n'
-              '      --shared) _shared=1 ;;\n'
-              '      -o) _out="${_args[$((i+1))]}" ;;\n'
-              '    esac\n'
-              '  done\n'
-              '  if [[ $_shared -eq 1 && -n $_out && -f $_out ]]; then\n'
-              '    python3 -c \'import pathlib,sys; p=pathlib.Path(sys.argv[1]); b=bytearray(p.read_bytes()); b[7]=9 if len(b)>8 and b[:4]==b"\\x7fELF" and b[7]!=9 else b[7]; p.write_bytes(b)\' "$_out"\n'
-              '  fi\n'
-              'fi\n'
-              'exit $status\n'
-          )
-          if "b[7]=9" in text or "b[7] = 9" in text:
-              print("prospero-lld already sets FreeBSD OSABI on shared objects")
-          elif old not in text:
-              raise SystemExit("prospero-lld does not match the public SDK wrapper; not patching blindly")
-          else:
-              path.write_text(text.replace(old, new, 1))
-              print("patched installed prospero-lld for EI_OSABI FreeBSD on --shared outputs")
-          END_PATCH
+          if [[ "${{ steps.cache-sdk.outputs.cache-hit }}" == "true" ]]; then
+            echo "SDK cache hit; ensuring OSABI patch is present"
+          else
+            bash tools/setup-native-dependencies.sh
+          fi
+          python3 tools/ci-patch-prospero-lld.py
+          test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
+
+      - name: Upload SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-sdk
+          path: .deps/native/ps5-payload-sdk
+          if-no-files-found: error
+          retention-days: 3
+          include-hidden-files: true
+
+      - name: Upload RADV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-radv
+          path: .deps/ci/radv-release
+          if-no-files-found: error
+          retention-days: 3
+
+  core-mame:
+    name: Core mame
+    needs: deps
+    runs-on: ubuntu-24.04
+    # Full-title runs spent ~4h still inside MAME after other cores; give MAME
+    # the whole job budget so it is not racing SDK/RADV/other cores.
+    timeout-minutes: 360
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the host toolchain
+        run: bash tools/ci-install-host-toolchain.sh
+
+      - name: Download SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-sdk
+          path: .deps/native/ps5-payload-sdk
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-mame-${{ needs.deps.outputs.sdk_revision }}-${{ hashFiles('tools/build-mame.sh', 'tooling/mame/**') }}
+          restore-keys: |
+            ccache-mame-${{ needs.deps.outputs.sdk_revision }}-
+            ccache-mame-
+
+      - name: Build mame
+        env:
+          JOBS: 4
+        run: |
+          set -euo pipefail
+          python3 tools/ci-patch-prospero-lld.py
+          ccache -M 5G || true
+          ccache -z || true
+          bash tools/build-mame.sh
+          ccache -s || true
+          test -f build/cores/stage/cores/mame_libretro.so
+          test -f build/cores/stage/info/mame_libretro.info
+
+      - name: Prepare mame stage artifact
+        run: |
+          set -euo pipefail
+          rm -rf ci-artifact
+          mkdir -p ci-artifact/cores ci-artifact/info
+          cp -- build/cores/stage/cores/mame_libretro.so ci-artifact/cores/
+          cp -- build/cores/stage/info/mame_libretro.info ci-artifact/info/
+
+      - name: Upload mame stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-cores-mame
+          path: ci-artifact
+          if-no-files-found: error
+          retention-days: 3
+
+  cores-other:
+    name: Cores except mame
+    needs: deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the host toolchain
+        run: bash tools/ci-install-host-toolchain.sh
+
+      - name: Download SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-sdk
+          path: .deps/native/ps5-payload-sdk
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-cores-${{ needs.deps.outputs.sdk_revision }}-${{ hashFiles('tools/build-*.sh', 'tooling/**') }}
+          restore-keys: |
+            ccache-cores-${{ needs.deps.outputs.sdk_revision }}-
+            ccache-cores-
+
+      - name: Build non-mame release cores
+        env:
+          JOBS: 4
+        run: |
+          set -euo pipefail
+          python3 tools/ci-patch-prospero-lld.py
+          ccache -M 5G || true
+          ccache -z || true
+          # Same release list as tools/build-title.sh with RPCS3 omitted and mame
+          # built in core-mame. Order matches the sequential title build.
+          for script in \
+              fceumm mgba snes9x fbneo genesis-plus-gx ppsspp dolphin lrps2 \
+              beetle-psx mupen64plus beetle-saturn vice desmume azahar
+          do
+            echo "==> [ci] tools/build-$script.sh"
+            bash "tools/build-$script.sh"
+          done
+          ccache -s || true
+          missing=0
+          for core in \
+              fceumm mgba snes9x fbneo genesis_plus_gx ppsspp dolphin pcsx2 \
+              mednafen_psx_hw mupen64plus_next mednafen_saturn vice_x64sc \
+              desmume azahar
+          do
+            if [[ ! -f build/cores/stage/cores/${core}_libretro.so ]]; then
+              echo "missing core: $core" >&2
+              missing=1
+            fi
+            if [[ ! -f build/cores/stage/info/${core}_libretro.info ]]; then
+              echo "missing info: $core" >&2
+              missing=1
+            fi
+          done
+          [[ $missing -eq 0 ]]
+          test -d build/cores/stage/system/PPSSPP
+          test -d build/cores/stage/system/dolphin-emu/Sys
+
+      - name: Prepare other cores stage artifact
+        run: |
+          set -euo pipefail
+          rm -rf ci-artifact
+          mkdir -p ci-artifact
+          # Copy contents so the artifact root is cores/, info/, system/.
+          cp -a build/cores/stage/. ci-artifact/
+
+      - name: Upload other cores stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-cores-other
+          path: ci-artifact
+          if-no-files-found: error
+          retention-days: 3
+
+  title:
+    name: Assemble PPSA99169 and upload it
+    needs: [deps, core-mame, cores-other]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the host toolchain
+        run: bash tools/ci-install-host-toolchain.sh
+
+      - name: Download SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-sdk
+          path: .deps/native/ps5-payload-sdk
+
+      - name: Download RADV
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-radv
+          path: .deps/ci/radv-release
+
+      - name: Download staged cores
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ci-cores-*
+          merge-multiple: true
+          path: build/cores/stage
+
+      - name: Wire Vulkan sibling and staged cores layout
+        run: |
+          set -euo pipefail
+          parent=$(dirname "$GITHUB_WORKSPACE")
+          vulkan="$parent/PS5_Vulkan"
+          git clone --depth 1 https://github.com/mihawk-99/PS5_Vulkan.git "$vulkan"
+          mkdir -p "$vulkan/.deps/native"
+          rm -rf "$vulkan/.deps/native/radv-release"
+          cp -a .deps/ci/radv-release "$vulkan/.deps/native/radv-release"
+          test -f "$vulkan/.deps/native/radv-release/lib/libvulkan_radeon.ps5.a"
+          test -d build/cores/stage/cores
+          test -f build/cores/stage/cores/mame_libretro.so
+          test -f build/cores/stage/info/mame_libretro.info
+          python3 tools/ci-patch-prospero-lld.py
+          find build/cores/stage/cores -type f -name '*_libretro.so' | sort
+          find build/cores/stage/cores -type f -name '*_libretro.so' | wc -l
 
       - name: Fetch the pinned RetroArch sources
         run: |
@@ -158,7 +350,9 @@ jobs:
           bash tools/fetch-retroarch.sh
           bash tools/fetch-retroarch.sh --verify
 
-      - name: Build the title
+      - name: Build the title from staged cores
+        env:
+          CFGFIX_USE_STAGED_CORES: "1"
         run: |
           set -euo pipefail
           if ! bash tools/build-title.sh; then
