@@ -141,20 +141,29 @@ jobs:
           python3 tools/ci-patch-prospero-lld.py
           test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
 
+      # upload-artifact@v4 flattens modes/symlinks; ship tars so prospero-clang
+      # stays executable for core-fork.sh's -x bootstrap check.
+      - name: Pack SDK and RADV for artifact upload
+        run: |
+          set -euo pipefail
+          tar -C .deps/native -cf ci-sdk.tar ps5-payload-sdk
+          tar -C .deps/ci -cf ci-radv.tar radv-release
+          test -f ci-sdk.tar
+          test -f ci-radv.tar
+
       - name: Upload SDK artifact
         uses: actions/upload-artifact@v4
         with:
           name: ci-sdk
-          path: .deps/native/ps5-payload-sdk
+          path: ci-sdk.tar
           if-no-files-found: error
           retention-days: 3
-          include-hidden-files: true
 
       - name: Upload RADV artifact
         uses: actions/upload-artifact@v4
         with:
           name: ci-radv
-          path: .deps/ci/radv-release
+          path: ci-radv.tar
           if-no-files-found: error
           retention-days: 3
 
@@ -176,7 +185,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ci-sdk
-          path: .deps/native/ps5-payload-sdk
+          path: .deps/ci-download
+
+      - name: Unpack SDK artifact
+        run: |
+          set -euo pipefail
+          mkdir -p .deps/native
+          tar -C .deps/native -xf .deps/ci-download/ci-sdk.tar
+          test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -232,7 +248,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ci-sdk
-          path: .deps/native/ps5-payload-sdk
+          path: .deps/ci-download
+
+      - name: Unpack SDK artifact
+        run: |
+          set -euo pipefail
+          mkdir -p .deps/native
+          tar -C .deps/native -xf .deps/ci-download/ci-sdk.tar
+          test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -312,13 +335,27 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ci-sdk
-          path: .deps/native/ps5-payload-sdk
+          path: .deps/ci-download
+
+      - name: Unpack SDK artifact
+        run: |
+          set -euo pipefail
+          mkdir -p .deps/native
+          tar -C .deps/native -xf .deps/ci-download/ci-sdk.tar
+          test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
 
       - name: Download RADV
         uses: actions/download-artifact@v4
         with:
           name: ci-radv
-          path: .deps/ci/radv-release
+          path: .deps/ci-download
+
+      - name: Unpack RADV artifact
+        run: |
+          set -euo pipefail
+          mkdir -p .deps/ci
+          tar -C .deps/ci -xf .deps/ci-download/ci-radv.tar
+          test -f .deps/ci/radv-release/lib/libvulkan_radeon.ps5.a
 
       - name: Download staged cores
         uses: actions/download-artifact@v4
