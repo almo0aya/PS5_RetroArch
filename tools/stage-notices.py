@@ -162,7 +162,7 @@ def source_of(component, tokens, root, title):
     return info
 
 
-def copy_text(entry, tokens, root, target):
+def copy_text(entry, tokens, root, target, component=None):
     """Copy one licence text (a file, a directory or a tarball member)."""
     destination = target / entry["to"]
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -187,6 +187,26 @@ def copy_text(entry, tokens, root, target):
             else:
                 shutil.copyfile(source, destination)
             return choice
+    # Split CI assemble keeps only staged .so files; upstream source trees (and
+    # their Copying/LICENSE files) are not on the runner. Record the SPDX id so
+    # licenses/ still documents every shipped core.
+    if os.environ.get("CFGFIX_USE_STAGED_CORES") == "1" and component is not None:
+        licence = component.get("licence", "UNKNOWN")
+        remote = ""
+        src = component.get("source") or {}
+        if isinstance(src, dict) and src.get("remote"):
+            remote = src["remote"]
+        body = (
+            f"SPDX-License-Identifier: {licence}\n"
+            f"\n"
+            f"Upstream licence text for {component.get('name', component.get('id', '?'))}\n"
+            f"was not retained with the staged core artifact used by this CI assemble.\n"
+            f"Expected local path(s): {', '.join(choices)}\n"
+        )
+        if remote:
+            body += f"Source remote: {remote}\n"
+        destination.write_text(body, encoding="utf-8")
+        return f"spdx-stub:{licence}"
     raise NoticeError(f"licence text not found: {' or '.join(choices)}")
 
 
@@ -275,9 +295,9 @@ def write(title, driver, tag, tokens, root, table, target):
         folder = target / component["id"]
         folder.mkdir()
         for entry in component["texts"]:
-            origin = copy_text(entry, tokens, root, folder)
+            origin = copy_text(entry, tokens, root, folder, component=component)
             record = {"file": entry["to"], "from": origin}
-            if entry.get("verbatim"):
+            if entry.get("verbatim") and not str(origin).startswith("spdx-stub:"):
                 record["sha256"] = sha256(folder / entry["to"])
             texts.append(record)
         executables = {f: sha256(title / f) for f in present
