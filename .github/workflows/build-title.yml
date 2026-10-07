@@ -230,9 +230,10 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf ci-artifact
-          mkdir -p ci-artifact/cores ci-artifact/info
+          mkdir -p ci-artifact/cores ci-artifact/info ci-artifact/reports/mame
           cp -- build/cores/stage/cores/mame_libretro.so ci-artifact/cores/
           cp -- build/cores/stage/info/mame_libretro.info ci-artifact/info/
+          cp -- build/cores/mame/build.json ci-artifact/reports/mame/
 
       - name: Upload mame stage
         uses: actions/upload-artifact@v4
@@ -321,6 +322,15 @@ jobs:
           mkdir -p ci-artifact
           # Copy contents so the artifact root is cores/, info/, system/.
           cp -a build/cores/stage/. ci-artifact/
+          # Retain build reports so Assemble/stage-notices can verify .so digests.
+          mkdir -p ci-artifact/reports
+          for build_dir in build/cores/*/build.json; do
+            name=$(basename "$(dirname "$build_dir")")
+            [[ $name == stage ]] && continue
+            [[ $name == mame ]] && continue
+            mkdir -p "ci-artifact/reports/$name"
+            cp -- "$build_dir" "ci-artifact/reports/$name/"
+          done
 
       - name: Upload other cores stage
         uses: actions/upload-artifact@v4
