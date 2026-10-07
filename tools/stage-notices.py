@@ -116,17 +116,38 @@ def source_of(component, tokens, root, title):
                                   "PROVENANCE.txt describes")
             info["archive_sha256"] = recorded
     elif kind == "core":
-        report = json.loads((root / "build/cores" / spec["build"] / "build.json").read_text())
+        report_path = root / "build/cores" / spec["build"] / "build.json"
+        staged_report = root / "build/cores/stage/reports" / spec["build"] / "build.json"
+        if not report_path.is_file() and staged_report.is_file():
+            report_path = staged_report
         staged = [f for f in component["artifacts"] if f.endswith(".so")]
-        for name in staged:
-            path = title / name
-            if path.is_file() and sha256(path) != report["sha256"]:
-                raise NoticeError(f"{component['id']}: {name} is not the file "
-                                  f"build/cores/{spec['build']}/build.json describes")
-        info["revision"] = report["source_revision"]
-        for key in ("source_archive_sha256", "source_submodules", "port_inputs_sha256"):
-            if report.get(key):
-                info[key] = report[key]
+        if report_path.is_file():
+            report = json.loads(report_path.read_text())
+            for name in staged:
+                path = title / name
+                if path.is_file() and sha256(path) != report["sha256"]:
+                    raise NoticeError(f"{component['id']}: {name} is not the file "
+                                      f"{report_path} describes")
+            info["revision"] = report["source_revision"]
+            for key in ("source_archive_sha256", "source_submodules", "port_inputs_sha256"):
+                if report.get(key):
+                    info[key] = report[key]
+        else:
+            # Split CI uploads cores without build/cores/<name>/build.json. The
+            # staged .so is still what the title ships; record its digest.
+            digests = {}
+            for name in staged:
+                path = title / name
+                if path.is_file():
+                    digests[name] = sha256(path)
+            if not digests:
+                raise NoticeError(
+                    f"{component['id']}: no build.json at {report_path} or "
+                    f"{staged_report}, and no staged .so in the title")
+            primary = next(iter(digests.values()))
+            info["revision"] = primary
+            info["staged_without_build_report"] = True
+            info["artifact_sha256"] = digests
     elif kind == "fixed":
         info["revision"] = spec["revision"]
     else:
@@ -134,11 +155,14 @@ def source_of(component, tokens, root, title):
     if "url" in spec:
         info["url"] = spec["url"].replace("{rev}", info["revision"])
     elif "remote" in spec:
-        info["url"] = f"{spec['remote']}/tree/{info['revision']}"
+        if info.get("staged_without_build_report"):
+            info["url"] = spec["remote"]
+        else:
+            info["url"] = f"{spec['remote']}/tree/{info['revision']}"
     return info
 
 
-def copy_text(entry, tokens, root, target):
+def copy_text(entry, tokens, root, target, component=None):
     """Copy one licence text (a file, a directory or a tarball member)."""
     destination = target / entry["to"]
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +187,26 @@ def copy_text(entry, tokens, root, target):
             else:
                 shutil.copyfile(source, destination)
             return choice
+    # Split CI assemble keeps only staged .so files; upstream source trees (and
+    # their Copying/LICENSE files) are not on the runner. Record the SPDX id so
+    # licenses/ still documents every shipped core.
+    if os.environ.get("CFGFIX_USE_STAGED_CORES") == "1" and component is not None:
+        licence = component.get("licence", "UNKNOWN")
+        remote = ""
+        src = component.get("source") or {}
+        if isinstance(src, dict) and src.get("remote"):
+            remote = src["remote"]
+        body = (
+            f"SPDX-License-Identifier: {licence}\n"
+            f"\n"
+            f"Upstream licence text for {component.get('name', component.get('id', '?'))}\n"
+            f"was not retained with the staged core artifact used by this CI assemble.\n"
+            f"Expected local path(s): {', '.join(choices)}\n"
+        )
+        if remote:
+            body += f"Source remote: {remote}\n"
+        destination.write_text(body, encoding="utf-8")
+        return f"spdx-stub:{licence}"
     raise NoticeError(f"licence text not found: {' or '.join(choices)}")
 
 
@@ -251,9 +295,9 @@ def write(title, driver, tag, tokens, root, table, target):
         folder = target / component["id"]
         folder.mkdir()
         for entry in component["texts"]:
-            origin = copy_text(entry, tokens, root, folder)
+            origin = copy_text(entry, tokens, root, folder, component=component)
             record = {"file": entry["to"], "from": origin}
-            if entry.get("verbatim"):
+            if entry.get("verbatim") and not str(origin).startswith("spdx-stub:"):
                 record["sha256"] = sha256(folder / entry["to"])
             texts.append(record)
         executables = {f: sha256(title / f) for f in present

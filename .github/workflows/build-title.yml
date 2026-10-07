@@ -1,0 +1,474 @@
+# Build the PS5 RetroArch title and upload dist/<title id>/.
+#
+# The public toolchain is ps5-payload-dev/sdk v0.42 plus the headers and
+# platform layer from mihawk-99/PS5_PayloadSDK. tools/setup-native-dependencies.sh
+# does not clone that fork; it git-archives a sibling checkout at the revision
+# the script pins. This workflow fetches those commits (they are public; the
+# RetroArch pin is also tag retroarch-v0.6.0-alpha.6) and PS5_Vulkan's pin,
+# builds the RADV archive the title links, builds cores in parallel jobs so no
+# single job sits on the 6-hour GitHub Actions cap, then runs tools/build-title.sh
+# with CFGFIX_USE_STAGED_CORES=1.
+#
+# PS5_RELEASE_TAG is set so RPCS3 is left out. The project forbids uploading
+# RPCS3 binaries (GPL-2.0-only combined with this port's GPL-3.0 code). A
+# release-mode title is the documented package that still produces eboot.bin
+# under dist/PPSA99169/.
+#
+# Host ld.lld writes EI_OSABI NONE for -m elf_x86_64. tools/check-core.py
+# rejects that. The from-source build that produced dist/PPSA99169/eboot.bin
+# patched the installed prospero-lld so --shared outputs are FreeBSD OSABI 9.
+# The public SDK pin does not include that, so the same adjustment is applied
+# to the runner's installed SDK copy. eboot.bin is still produced by the
+# project's signer, not by rewriting the SELF.
+
+name: Build title
+
+# workflow_dispatch only: with pull_request as well every push to the PR started
+# two identical multi-hour builds in different concurrency groups (refs/pull/N/merge
+# and the branch), and the slower twin ran into the 6-hour job limit.
+on:
+  workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: >-
+          Prior workflow run id whose ci-sdk, ci-radv, and ci-cores-* artifacts
+          should be reused (skips SDK/RADV/cores jobs). Leave empty for a full build.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: build-title-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLVM_CONFIG: /usr/bin/llvm-config-18
+  # Not a published release. Only selects the release-mode core list.
+  PS5_RELEASE_TAG: ci-${{ github.sha }}
+
+jobs:
+  deps:
+    name: SDK and RADV
+    if: ${{ inputs.reuse_run_id == '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      sdk_revision: ${{ steps.pins.outputs.sdk_revision }}
+      mesa_revision: ${{ steps.pins.outputs.mesa_revision }}
+      vulkan_sdk: ${{ steps.pins.outputs.vulkan_sdk }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the host toolchain
+        run: bash tools/ci-install-host-toolchain.sh
+
+      - name: Fetch the public SDK, Mesa, and Vulkan checkouts
+        id: pins
+        run: |
+          set -euo pipefail
+          parent=$(dirname "$GITHUB_WORKSPACE")
+          vulkan="$parent/PS5_Vulkan"
+          mesa="$parent/PS5_Mesa"
+          sdk="$parent/PS5_PayloadSDK"
+          git clone --depth 1 https://github.com/mihawk-99/PS5_Vulkan.git "$vulkan"
+          mesa_revision=$(sed -n 's/^mesa_revision=//p' "$vulkan/tools/build-radv.sh")
+          vulkan_sdk=$(sed -n 's/^sdk_revision=//p' "$vulkan/tools/setup-native-dependencies.sh")
+          retro_sdk=$(sed -n 's/^sdk_revision=//p' tools/setup-native-dependencies.sh)
+          [[ $mesa_revision =~ ^[0-9a-f]{40}$ ]]
+          [[ $vulkan_sdk =~ ^[0-9a-f]{40}$ ]]
+          [[ $retro_sdk =~ ^[0-9a-f]{40}$ ]]
+          git init "$mesa"
+          git -C "$mesa" remote add origin https://github.com/mihawk-99/PS5_Mesa.git
+          git -C "$mesa" fetch --depth 1 origin "$mesa_revision"
+          git -C "$mesa" checkout --detach FETCH_HEAD
+          git init "$sdk"
+          git -C "$sdk" remote add origin https://github.com/mihawk-99/PS5_PayloadSDK.git
+          git -C "$sdk" fetch --depth 1 origin "$retro_sdk"
+          git -C "$sdk" fetch --depth 1 origin "$vulkan_sdk"
+          git -C "$sdk" checkout --detach "$retro_sdk"
+          git -C "$sdk" cat-file -e "$vulkan_sdk^{commit}"
+          {
+            echo "sdk_revision=$retro_sdk"
+            echo "mesa_revision=$mesa_revision"
+            echo "vulkan_sdk=$vulkan_sdk"
+          } >> "$GITHUB_OUTPUT"
+          echo "RetroArch SDK pin $retro_sdk"
+          echo "Vulkan SDK pin $vulkan_sdk"
+          echo "Mesa pin $mesa_revision"
+
+      - name: Restore cached SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: .deps/native/ps5-payload-sdk
+          key: sdk-${{ steps.pins.outputs.sdk_revision }}-${{ hashFiles('tools/setup-native-dependencies.sh', 'tools/ci-patch-prospero-lld.py') }}
+
+      - name: Restore cached RADV archive
+        id: cache-radv
+        uses: actions/cache@v4
+        with:
+          path: .deps/ci/radv-release
+          key: radv-${{ steps.pins.outputs.mesa_revision }}-${{ steps.pins.outputs.vulkan_sdk }}
+
+      - name: Build the RADV archive the title links
+        if: steps.cache-radv.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          vulkan="$(dirname "$GITHUB_WORKSPACE")/PS5_Vulkan"
+          bash "$vulkan/tools/setup-native-dependencies.sh"
+          bash "$vulkan/tools/build-radv.sh" release
+          rm -rf "$vulkan/.deps/work"
+          mkdir -p .deps/ci
+          rm -rf .deps/ci/radv-release
+          cp -a "$vulkan/.deps/native/radv-release" .deps/ci/radv-release
+          df -h /
+
+      - name: Place cached RADV into the Vulkan tree
+        if: steps.cache-radv.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          vulkan="$(dirname "$GITHUB_WORKSPACE")/PS5_Vulkan"
+          mkdir -p "$vulkan/.deps/native"
+          rm -rf "$vulkan/.deps/native/radv-release"
+          cp -a .deps/ci/radv-release "$vulkan/.deps/native/radv-release"
+          test -f "$vulkan/.deps/native/radv-release/lib/libvulkan_radeon.ps5.a"
+          echo "restored RADV archive from cache"
+
+      - name: Install this repo's SDK and fix shared-object OSABI
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.cache-sdk.outputs.cache-hit }}" == "true" ]]; then
+            echo "SDK cache hit; ensuring OSABI patch is present"
+          else
+            bash tools/setup-native-dependencies.sh
+          fi
+          python3 tools/ci-patch-prospero-lld.py
+          test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
+
+      # upload-artifact@v4 flattens modes/symlinks; ship tars so prospero-clang
+      # stays executable for core-fork.sh's -x bootstrap check.
+      - name: Pack SDK and RADV for artifact upload
+        run: |
+          set -euo pipefail
+          tar -C .deps/native -cf ci-sdk.tar ps5-payload-sdk
+          tar -C .deps/ci -cf ci-radv.tar radv-release
+          test -f ci-sdk.tar
+          test -f ci-radv.tar
+
+      - name: Upload SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-sdk
+          path: ci-sdk.tar
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload RADV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-radv
+          path: ci-radv.tar
+          if-no-files-found: error
+          retention-days: 3
+
+  core-mame:
+    name: Core mame
+    if: ${{ inputs.reuse_run_id == '' }}
+    needs: deps
+    runs-on: ubuntu-24.04
+    # Full-title runs spent ~4h still inside MAME after other cores; give MAME
+    # the whole job budget so it is not racing SDK/RADV/other cores.
+    timeout-minutes: 360
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the host toolchain
+        run: bash tools/ci-install-host-toolchain.sh
+
+      - name: Download SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-sdk
+          path: .deps/ci-download
+
+      - name: Unpack SDK artifact
+        run: |
+          set -euo pipefail
+          mkdir -p .deps/native
+          tar -C .deps/native -xf .deps/ci-download/ci-sdk.tar
+          test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-mame-${{ needs.deps.outputs.sdk_revision }}-${{ hashFiles('tools/build-mame.sh', 'tooling/mame/**') }}
+          restore-keys: |
+            ccache-mame-${{ needs.deps.outputs.sdk_revision }}-
+            ccache-mame-
+
+      - name: Build mame
+        env:
+          JOBS: 4
+        run: |
+          set -euo pipefail
+          python3 tools/ci-patch-prospero-lld.py
+          ccache -M 5G || true
+          ccache -z || true
+          bash tools/build-mame.sh
+          ccache -s || true
+          test -f build/cores/stage/cores/mame_libretro.so
+          test -f build/cores/stage/info/mame_libretro.info
+
+      - name: Prepare mame stage artifact
+        run: |
+          set -euo pipefail
+          rm -rf ci-artifact
+          mkdir -p ci-artifact/cores ci-artifact/info ci-artifact/reports/mame
+          cp -- build/cores/stage/cores/mame_libretro.so ci-artifact/cores/
+          cp -- build/cores/stage/info/mame_libretro.info ci-artifact/info/
+          cp -- build/cores/mame/build.json ci-artifact/reports/mame/
+
+      - name: Upload mame stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-cores-mame
+          path: ci-artifact
+          if-no-files-found: error
+          retention-days: 3
+
+  cores-other:
+    name: Cores except mame
+    if: ${{ inputs.reuse_run_id == '' }}
+    needs: deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the host toolchain
+        run: bash tools/ci-install-host-toolchain.sh
+
+      - name: Download SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-sdk
+          path: .deps/ci-download
+
+      - name: Unpack SDK artifact
+        run: |
+          set -euo pipefail
+          mkdir -p .deps/native
+          tar -C .deps/native -xf .deps/ci-download/ci-sdk.tar
+          test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-cores-${{ needs.deps.outputs.sdk_revision }}-${{ hashFiles('tools/build-*.sh', 'tooling/**') }}
+          restore-keys: |
+            ccache-cores-${{ needs.deps.outputs.sdk_revision }}-
+            ccache-cores-
+
+      - name: Build non-mame release cores
+        env:
+          JOBS: 4
+        run: |
+          set -euo pipefail
+          python3 tools/ci-patch-prospero-lld.py
+          ccache -M 5G || true
+          ccache -z || true
+          # Same release list as tools/build-title.sh with RPCS3 omitted and mame
+          # built in core-mame. Order matches the sequential title build.
+          for script in \
+              fceumm mgba snes9x fbneo genesis-plus-gx ppsspp dolphin lrps2 \
+              beetle-psx mupen64plus beetle-saturn vice desmume azahar
+          do
+            echo "==> [ci] tools/build-$script.sh"
+            bash "tools/build-$script.sh"
+          done
+          ccache -s || true
+          missing=0
+          for core in \
+              fceumm mgba snes9x fbneo genesis_plus_gx ppsspp dolphin pcsx2 \
+              mednafen_psx_hw mupen64plus_next mednafen_saturn vice_x64sc \
+              desmume azahar
+          do
+            if [[ ! -f build/cores/stage/cores/${core}_libretro.so ]]; then
+              echo "missing core: $core" >&2
+              missing=1
+            fi
+            if [[ ! -f build/cores/stage/info/${core}_libretro.info ]]; then
+              echo "missing info: $core" >&2
+              missing=1
+            fi
+          done
+          [[ $missing -eq 0 ]]
+          test -d build/cores/stage/system/PPSSPP
+          test -d build/cores/stage/system/dolphin-emu/Sys
+
+      - name: Prepare other cores stage artifact
+        run: |
+          set -euo pipefail
+          rm -rf ci-artifact
+          mkdir -p ci-artifact
+          # Copy contents so the artifact root is cores/, info/, system/.
+          cp -a build/cores/stage/. ci-artifact/
+          # Retain build reports so Assemble/stage-notices can verify .so digests.
+          mkdir -p ci-artifact/reports
+          for build_dir in build/cores/*/build.json; do
+            name=$(basename "$(dirname "$build_dir")")
+            [[ $name == stage ]] && continue
+            [[ $name == mame ]] && continue
+            mkdir -p "ci-artifact/reports/$name"
+            cp -- "$build_dir" "ci-artifact/reports/$name/"
+          done
+
+      - name: Upload other cores stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-cores-other
+          path: ci-artifact
+          if-no-files-found: error
+          retention-days: 3
+
+  title:
+    name: Assemble PPSA99169 and upload it
+    needs: [deps, core-mame, cores-other]
+    # Run when building fresh (all needs succeeded) or when reusing a prior run's
+    # artifacts (needs are skipped). Never run if a needed job actually failed.
+    if: >-
+      always()
+      && !cancelled()
+      && (
+        inputs.reuse_run_id != ''
+        || (
+          needs.deps.result == 'success'
+          && needs.core-mame.result == 'success'
+          && needs.cores-other.result == 'success'
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the host toolchain
+        run: bash tools/ci-install-host-toolchain.sh
+
+      - name: Resolve artifact source run
+        id: artifact_run
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.reuse_run_id }}" ]]; then
+            echo "run_id=${{ inputs.reuse_run_id }}" >> "$GITHUB_OUTPUT"
+            echo "Reusing artifacts from run ${{ inputs.reuse_run_id }}"
+          else
+            echo "run_id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "Using artifacts from this run ${{ github.run_id }}"
+          fi
+
+      - name: Download SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-sdk
+          path: .deps/ci-download
+          run-id: ${{ steps.artifact_run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Unpack SDK artifact
+        run: |
+          set -euo pipefail
+          mkdir -p .deps/native
+          tar -C .deps/native -xf .deps/ci-download/ci-sdk.tar
+          test -x .deps/native/ps5-payload-sdk/bin/prospero-clang
+
+      - name: Download RADV
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-radv
+          path: .deps/ci-download
+          run-id: ${{ steps.artifact_run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Unpack RADV artifact
+        run: |
+          set -euo pipefail
+          mkdir -p .deps/ci
+          tar -C .deps/ci -xf .deps/ci-download/ci-radv.tar
+          test -f .deps/ci/radv-release/lib/libvulkan_radeon.ps5.a
+
+      - name: Download staged cores
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ci-cores-*
+          merge-multiple: true
+          path: build/cores/stage
+          run-id: ${{ steps.artifact_run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Wire Vulkan sibling and staged cores layout
+        run: |
+          set -euo pipefail
+          parent=$(dirname "$GITHUB_WORKSPACE")
+          vulkan="$parent/PS5_Vulkan"
+          git clone --depth 1 https://github.com/mihawk-99/PS5_Vulkan.git "$vulkan"
+          mkdir -p "$vulkan/.deps/native"
+          rm -rf "$vulkan/.deps/native/radv-release"
+          cp -a .deps/ci/radv-release "$vulkan/.deps/native/radv-release"
+          test -f "$vulkan/.deps/native/radv-release/lib/libvulkan_radeon.ps5.a"
+          test -d build/cores/stage/cores
+          test -f build/cores/stage/cores/mame_libretro.so
+          test -f build/cores/stage/info/mame_libretro.info
+          python3 tools/ci-patch-prospero-lld.py
+          find build/cores/stage/cores -type f -name '*_libretro.so' | sort
+          find build/cores/stage/cores -type f -name '*_libretro.so' | wc -l
+
+      - name: Fetch the pinned RetroArch sources
+        run: |
+          set -euo pipefail
+          bash tools/fetch-retroarch.sh
+          bash tools/fetch-retroarch.sh --verify
+
+      - name: Build the title from staged cores
+        env:
+          CFGFIX_USE_STAGED_CORES: "1"
+        run: |
+          set -euo pipefail
+          if ! bash tools/build-title.sh; then
+            echo '==== build/ra-conf/configure.log ===='
+            if [[ -f build/ra-conf/configure.log ]]; then
+              cat build/ra-conf/configure.log
+            else
+              echo '(missing)'
+            fi
+            echo '==== build/ra-conf/info.log ===='
+            if [[ -f build/ra-conf/info.log ]]; then
+              cat build/ra-conf/info.log
+            else
+              echo '(missing)'
+            fi
+            exit 1
+          fi
+          title_id=$(python3 -c 'import json; print(json.load(open("sce_sys/param.json"))["titleId"])')
+          test -f "dist/$title_id/eboot.bin"
+          echo "TITLE_ID=$title_id" >> "$GITHUB_ENV"
+          find "dist/$title_id" -type f | wc -l
+          stat -c '%s bytes eboot.bin' "dist/$title_id/eboot.bin"
+
+      - name: Upload the title folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TITLE_ID }}
+          path: dist/${{ env.TITLE_ID }}
+          if-no-files-found: error
+          retention-days: 14

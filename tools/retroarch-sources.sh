@@ -27,7 +27,7 @@ cd "$root"
 
 upstream="$root/vendor/retroarch"
 work="$root/build/ra-conf"
-sdk="${PS5_PAYLOAD_SDK:-$root/../ps5-native-app-boilerplate-main/.deps/native/ps5-payload-sdk}"
+sdk="${PS5_PAYLOAD_SDK:-$root/.deps/native/ps5-payload-sdk}"
 
 configure_flags=(
     --prefix=/user/homebrew
@@ -139,6 +139,22 @@ if [[ ! -f $work/config.mk || ! -f $work/config.h || ! -f $work/.configure-id ||
             echo "error: a port change could not be applied to $work" >&2
             exit 2
         }
+    fi
+    # --enable-vulkan forces a configure-time link of -lvulkan. A clean SDK from
+    # setup-native-dependencies.sh has none; install a one-symbol stub into the
+    # SDK lib dir (prospero-clang already passes -L$sdk/target/lib).
+    stub_src="$root/tooling/ps5-stubs/vk_configure_stub.c"
+    stub_dir="$root/build/vulkan-stub"
+    stub_a="$sdk/target/lib/libvulkan.a"
+    if [[ ! -f $stub_a ]]; then
+        mkdir -p "$stub_dir" "$sdk/target/lib"
+        "$sdk/bin/prospero-clang" -c "$stub_src" -o "$stub_dir/vk_configure_stub.o"
+        ar_bin=$sdk/bin/prospero-llvm-ar
+        [[ -x $ar_bin ]] || ar_bin=$sdk/bin/prospero-ar
+        [[ -x $ar_bin ]] || ar_bin=$(command -v llvm-ar-18 || command -v llvm-ar || command -v ar)
+        "$ar_bin" rcs "$stub_dir/libvulkan.a" "$stub_dir/vk_configure_stub.o"
+        cp -f "$stub_dir/libvulkan.a" "$stub_a"
+        echo "==> [sources] installed configure-only libvulkan.a stub into the SDK" >&2
     fi
     (
         cd "$work"

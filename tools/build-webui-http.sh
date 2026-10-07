@@ -12,7 +12,25 @@ build="$root/build/webui-mhd-$mode"
 archive="$cache/libmicrohttpd-$version.tar.gz"
 mkdir -p "$cache" "$build"
 if [[ ! -f $archive ]]; then
-    curl -fL "https://ftp.gnu.org/gnu/libmicrohttpd/libmicrohttpd-$version.tar.gz" -o "$archive.download"
+    # ftp.gnu.org is often unreachable from GitHub Actions; try mirrors first.
+    downloaded=
+    for url in \
+        "https://ftpmirror.gnu.org/gnu/libmicrohttpd/libmicrohttpd-$version.tar.gz" \
+        "https://mirrors.kernel.org/gnu/libmicrohttpd/libmicrohttpd-$version.tar.gz" \
+        "https://ftp.gnu.org/gnu/libmicrohttpd/libmicrohttpd-$version.tar.gz"
+    do
+        echo "==> [webui-http] fetching $url" >&2
+        if curl --fail --location --retry 3 --retry-delay 2 --connect-timeout 30 \
+            --max-time 300 "$url" -o "$archive.download"; then
+            downloaded=1
+            break
+        fi
+        rm -f "$archive.download"
+    done
+    [[ -n $downloaded ]] || {
+        echo "error: could not download libmicrohttpd-$version from any GNU mirror" >&2
+        exit 1
+    }
     printf '%s  %s\n' "$hash" "$archive.download" | sha256sum -c - >&2
     mv "$archive.download" "$archive"
 fi

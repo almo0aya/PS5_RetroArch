@@ -115,8 +115,11 @@ if [[ $actual != "$revision" ]]; then
     exit 2
 fi
 
-for required in retroarch.c Makefile.common gfx/video_driver.c gfx/video_driver.h \
-                qb/config.params.sh libretro-common/include/retroarch.h; do
+# retroarch.h lived under libretro-common/include/ on older trees; v1.22.x
+# keeps it at the repository root next to retroarch.c.
+for required in retroarch.c retroarch.h Makefile.common gfx/video_driver.c \
+                gfx/video_driver.h qb/config.params.sh \
+                libretro-common/include/libretro.h; do
     [[ -f $staging/$required ]] || {
         echo "error: the fetched tree has no $required" >&2
         rm -rf "$staging"

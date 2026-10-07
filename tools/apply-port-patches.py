@@ -537,9 +537,8 @@ static void ps5_core_option_default(struct core_option *option)
         "           * recording with an error at vkEndCommandBuffer, so those command\n"
         "           * buffers never submit.\n"
         "           *\n"
-        "           * The config cannot make this choice: content loading rebuilds\n"
-        "           * argv and drops the title's `-c`, so /app0/retroarch.cfg's\n"
-        "           * video_driver is never parsed. */\n"
+        "           * Compiled default remains vulkan; cfg video_driver wins when\n"
+        "           * `-c` is preserved on content load (patches/series, 0105). */\n"
         "          return \"vulkan\";",
         "return \"vulkan\";",
     ),
@@ -547,18 +546,9 @@ static void ps5_core_option_default(struct core_option *option)
         # The console's pad is this build's input driver, so it is also the
         # compiled default.
         #
-        # This is what makes the driver reachable without a config file. There is
-        # no config file at runtime yet: content loading rebuilds argv and drops
-        # the title's `-c`, and the fix for that is parked because reading the
-        # config still crashes the launch. With no config read, the whole input
-        # path runs on compiled defaults - `probe init_input entered: *input=ba4dc0
-        # configured="null" joypad="null"` is that measurement - so naming this
-        # project's driver here is what puts it in `input_drivers[]`'s place before
-        # the frontend initialises anything.
-        #
-        # One line, and reversible: when the config file is readable again the
-        # config's own `input_driver` wins at parse time and this default stops
-        # mattering, at which point it can be deleted.
+        # Compiled input default so the pad works even before a cfg is read.
+        # patches/series 0105 keeps `-c` on content-load argv rebuilds, so a
+        # cfg `input_driver` still wins at parse time when present.
         "configuration.c",
         "      case INPUT_NULL:\n          break;",
         "      case INPUT_NULL:\n"
@@ -3424,6 +3414,85 @@ static void ps5_core_option_default(struct core_option *option)
         "#endif\n",
         "patches/series, 0101): the pad script's",
     ),
+    (
+        # 0105: content_load_init_wrap rebuilds argv from wrap_args. When the
+        # frontend environment (or menu_content_environment_get on first load)
+        # leaves config_path NULL, -c is omitted and every setting falls back
+        # to compiled defaults. Re-inject the title's live config path.
+        "tasks/task_content.c",
+        "   if (args->flags & RARCH_MAIN_WRAP_FLAG_VERBOSE)\n"
+        "      argv[(*argc)++] = strldup(\"-v\", sizeof(\"-v\"));\n",
+        "   if (args->flags & RARCH_MAIN_WRAP_FLAG_VERBOSE)\n"
+        "      argv[(*argc)++] = strldup(\"-v\", sizeof(\"-v\"));\n"
+        "\n"
+        "   /* Added by this port (patches/series, 0105): content loading rebuilds\n"
+        "    * argv and previously dropped the title's `-c`, so video_driver and\n"
+        "    * menu_driver from /app0/config/retroarch.cfg never applied. */\n"
+        "   if (!args->config_path)\n"
+        "   {\n"
+        "      const char *cfg = g_defaults.path_config;\n"
+        "      if (string_is_empty(cfg))\n"
+        "         cfg = \"/app0/config/retroarch.cfg\";\n"
+        "      argv[(*argc)++] = strldup(\"-c\", sizeof(\"-c\"));\n"
+        "      argv[(*argc)++] = strdup(cfg);\n"
+        "   }\n",
+        "patches/series, 0105): content loading rebuilds",
+    ),
+    (
+        # 0105: on first content wrap, RARCH_PATH_CONFIG is still empty because
+        # retroarch_main_init has not parsed -c yet. Fall back to the path the
+        # frontend seed wrote into g_defaults.path_config during init.
+        "tasks/task_content.c",
+        "   if (!path_is_empty(RARCH_PATH_CONFIG))\n"
+        "      wrap_args->config_path   = path_get(RARCH_PATH_CONFIG);\n",
+        "   if (!path_is_empty(RARCH_PATH_CONFIG))\n"
+        "      wrap_args->config_path   = path_get(RARCH_PATH_CONFIG);\n"
+        "   /* patches/series, 0105): first wrap has no RARCH_PATH_CONFIG yet. */\n"
+        "   else if (!string_is_empty(g_defaults.path_config))\n"
+        "      wrap_args->config_path   = g_defaults.path_config;\n",
+        "patches/series, 0105): first wrap has no RARCH_PATH_CONFIG",
+    ),
+    (
+        # 0105: allow menu drivers that are not RGUI when the video driver is
+        # this port's "ps5" backend (otherwise cfg video_driver=ps5 + xmb is
+        # forced back to rgui by check_menu_driver_compatibility).
+        "configuration.c",
+        "         || string_is_equal(video_driver, \"vulkan\")\n"
+        "         || string_is_equal(video_driver, \"metal\")\n"
+        "         || string_is_equal(video_driver, \"ctr\")\n"
+        "         || string_is_equal(video_driver, \"vita2d\")\n"
+        "         || string_is_equal(video_driver, \"rsx\")\n"
+        "      )\n"
+        "      return true;\n",
+        "         || string_is_equal(video_driver, \"vulkan\")\n"
+        "         || string_is_equal(video_driver, \"metal\")\n"
+        "         || string_is_equal(video_driver, \"ctr\")\n"
+        "         || string_is_equal(video_driver, \"vita2d\")\n"
+        "         || string_is_equal(video_driver, \"rsx\")\n"
+        "         /* patches/series, 0105): native PS5 display backend. */\n"
+        "         || string_is_equal(video_driver, \"ps5\")\n"
+        "      )\n"
+        "      return true;\n",
+        "patches/series, 0105): native PS5 display backend",
+    ),
+    (
+        # 0106: SCE ctype stubs make isgraph always 0 (Kyty / no rune table), so
+        # config_file accepted no keys and video_driver/menu_driver never left
+        # the compiled defaults even when -c pointed at a valid cfg.
+        "libretro-common/file/config_file.c",
+        "      while (line[idx] && isgraph((int)line[idx]))\n",
+        "      /* patches/series, 0106: ASCII isgraph; SCE ctype stubs return 0. */\n"
+        "      while (line[idx] && ((unsigned char)line[idx] > 0x20 && (unsigned char)line[idx] < 0x7f))\n",
+        "patches/series, 0106: ASCII isgraph; SCE ctype stubs return 0.",
+    ),
+    (
+        "libretro-common/file/config_file.c",
+        "   while (isgraph((int)*line))\n",
+        "   /* patches/series, 0106: ASCII isgraph for keys; SCE ctype stubs return 0. */\n"
+        "   while ((unsigned char)(*line) > 0x20 && (unsigned char)(*line) < 0x7f)\n",
+        "patches/series, 0106: ASCII isgraph for keys",
+    ),
+
 ]
 
 # Changes that are withdrawn rather than deleted, by marker.

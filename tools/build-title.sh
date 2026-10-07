@@ -59,6 +59,7 @@ bash "$root/tools/setup-native-dependencies.sh" >/dev/null
 }
 
 echo "==> [title] step 1/3: the frontend"
+export PS5_PAYLOAD_SDK="$sdk"
 "$root/tools/build-retroarch.sh"
 core_names=(fceumm mgba snes9x fbneo genesis_plus_gx ppsspp dolphin pcsx2
     mednafen_psx_hw mupen64plus_next mednafen_saturn vice_x64sc desmume azahar mame rpcs3)
@@ -74,6 +75,12 @@ if [[ -n ${PS5_RELEASE_TAG:-} ]]; then
     echo "==> [title] release $PS5_RELEASE_TAG: RPCS3 left out (a console build only)"
 fi
 core_files=()
+if [[ ${CFGFIX_USE_STAGED_CORES:-0} == 1 ]]; then
+    echo "==> [title] using staged cores (CFGFIX_USE_STAGED_CORES=1)"
+    for core_name in "${core_names[@]}"; do
+        core_files+=("$root/build/cores/stage/cores/${core_name}_libretro.so")
+    done
+else
 for core_name in "${core_names[@]}"; do
     # Each library keeps its libretro name; the build script is the port's.
     case $core_name in
@@ -87,6 +94,7 @@ for core_name in "${core_names[@]}"; do
     bash "$root/tools/build-$script.sh"
     core_files+=("$root/build/cores/stage/cores/${core_name}_libretro.so")
 done
+fi
 python3 "$root/tools/core-imports.py" "${core_files[@]}"
 
 # The title's own sources are compiled with the same feature defines as the
@@ -173,6 +181,7 @@ vulkan_archives=(
     "$vulkan_dir/build/driver/ps5/libpsbc_driver.ps5.a"
     "$vulkan_dir/.deps/native/psbc/lib/libpsbc_support.ps5.a"
 )
+if [[ $vulkan_driver == ps5vk ]]; then
 vulkan_missing=()
 for archive in "${vulkan_archives[@]}"; do
     [[ -f $archive ]] || vulkan_missing+=("$archive")
@@ -183,6 +192,7 @@ if (( ${#vulkan_missing[@]} )); then
     printf '       (tools/build-driver.sh) or set PS5_VULKAN_DIR.\n' >&2
     printf '       missing: %s\n' "${vulkan_missing[@]}" >&2
     exit 2
+fi
 fi
 # The driver may be developed concurrently. A diagnostic link uses stable local
 # archive copies; hashes describe exactly which driver went into this build.

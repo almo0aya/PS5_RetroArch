@@ -124,7 +124,8 @@ report.update(source_revision=revision, source_date_epoch=int(epoch),
               info_revision=info_revision, info_sha256=info_sha)
 report['port_inputs_sha256'] = {name: sha(pathlib.Path(name)) for name in
     ['tools/build-lrps2.sh', 'tooling/lrps2/ps5-toolchain.cmake',
-     'tooling/lrps2/ps5-libc-shims.cpp', 'tooling/native/core_cxx_runtime.cpp',
+     'tooling/lrps2/ps5-libc-shims.cpp', 'tooling/lrps2/ps5-intrin-compat.h',
+     'tooling/native/core_cxx_runtime.cpp',
      'tooling/native/ps5-core.ld']}
 (build / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
 PY

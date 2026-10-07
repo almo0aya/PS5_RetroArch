@@ -237,3 +237,15 @@
 # 0104  owner-selected PPSSPP 6x with 8x MSAA; retain saved overrides
 #       core_option_manager.c
 0104-ppsspp-msaa-default
+
+# 0105  content loading rebuilds argv and was dropping the title's `-c`, so
+#       retroarch.cfg video_driver/menu_driver never applied and compiled
+#       defaults (vulkan/xmb) won. Keep the live config path on rebuild, and
+#       fall back to g_defaults.path_config on the first wrap when
+#       RARCH_PATH_CONFIG is still empty.
+#       tasks/task_content.c
+0105-preserve-config-on-content-load
+# 0106  SCE ctype stubs make isgraph return 0 (Kyty / no rune table), so
+#       config_file parsed 0 entries from a valid cfg and drivers stayed at
+#       compiled defaults. Replace isgraph with ASCII checks in config_file.c.
+0106-ascii-isgraph-config-parse
