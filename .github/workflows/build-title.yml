@@ -28,6 +28,14 @@ name: Build title
 # and the branch), and the slower twin ran into the 6-hour job limit.
 on:
   workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: >-
+          Prior workflow run id whose ci-sdk, ci-radv, and ci-cores-* artifacts
+          should be reused (skips SDK/RADV/cores jobs). Leave empty for a full build.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -45,6 +53,7 @@ env:
 jobs:
   deps:
     name: SDK and RADV
+    if: ${{ inputs.reuse_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
@@ -169,6 +178,7 @@ jobs:
 
   core-mame:
     name: Core mame
+    if: ${{ inputs.reuse_run_id == '' }}
     needs: deps
     runs-on: ubuntu-24.04
     # Full-title runs spent ~4h still inside MAME after other cores; give MAME
@@ -234,6 +244,7 @@ jobs:
 
   cores-other:
     name: Cores except mame
+    if: ${{ inputs.reuse_run_id == '' }}
     needs: deps
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -322,6 +333,19 @@ jobs:
   title:
     name: Assemble PPSA99169 and upload it
     needs: [deps, core-mame, cores-other]
+    # Run when building fresh (all needs succeeded) or when reusing a prior run's
+    # artifacts (needs are skipped). Never run if a needed job actually failed.
+    if: >-
+      always()
+      && !cancelled()
+      && (
+        inputs.reuse_run_id != ''
+        || (
+          needs.deps.result == 'success'
+          && needs.core-mame.result == 'success'
+          && needs.cores-other.result == 'success'
+        )
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -331,11 +355,25 @@ jobs:
       - name: Install the host toolchain
         run: bash tools/ci-install-host-toolchain.sh
 
+      - name: Resolve artifact source run
+        id: artifact_run
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.reuse_run_id }}" ]]; then
+            echo "run_id=${{ inputs.reuse_run_id }}" >> "$GITHUB_OUTPUT"
+            echo "Reusing artifacts from run ${{ inputs.reuse_run_id }}"
+          else
+            echo "run_id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "Using artifacts from this run ${{ github.run_id }}"
+          fi
+
       - name: Download SDK
         uses: actions/download-artifact@v4
         with:
           name: ci-sdk
           path: .deps/ci-download
+          run-id: ${{ steps.artifact_run.outputs.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Unpack SDK artifact
         run: |
@@ -349,6 +387,8 @@ jobs:
         with:
           name: ci-radv
           path: .deps/ci-download
+          run-id: ${{ steps.artifact_run.outputs.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Unpack RADV artifact
         run: |
@@ -363,6 +403,8 @@ jobs:
           pattern: ci-cores-*
           merge-multiple: true
           path: build/cores/stage
+          run-id: ${{ steps.artifact_run.outputs.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Wire Vulkan sibling and staged cores layout
         run: |

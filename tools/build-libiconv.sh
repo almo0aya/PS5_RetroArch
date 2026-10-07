@@ -25,8 +25,27 @@ export PS5_PAYLOAD_SDK="$sdk" PS5_CLANG=${PS5_CLANG:-/usr/bin/clang}
 
 archive="$root/.deps/downloads/libiconv-$version.tar.gz"
 mkdir -p "$root/.deps/downloads"
-[[ -f $archive ]] || curl --fail --location --retry 3 \
-    "https://ftp.gnu.org/pub/gnu/libiconv/libiconv-$version.tar.gz" -o "$archive"
+if [[ ! -f $archive ]]; then
+    downloaded=
+    for url in \
+        "https://ftpmirror.gnu.org/gnu/libiconv/libiconv-$version.tar.gz" \
+        "https://mirrors.kernel.org/gnu/libiconv/libiconv-$version.tar.gz" \
+        "https://ftp.gnu.org/pub/gnu/libiconv/libiconv-$version.tar.gz"
+    do
+        echo "==> [libiconv] fetching $url" >&2
+        if curl --fail --location --retry 3 --retry-delay 2 --connect-timeout 30 \
+            --max-time 300 "$url" -o "$archive.download"; then
+            downloaded=1
+            break
+        fi
+        rm -f "$archive.download"
+    done
+    [[ -n $downloaded ]] || {
+        echo "error: could not download libiconv-$version from any GNU mirror" >&2
+        exit 1
+    }
+    mv "$archive.download" "$archive"
+fi
 printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --status || {
     echo "error: libiconv archive digest mismatch" >&2; exit 1; }
 build="$root/build/libiconv-ps5"
